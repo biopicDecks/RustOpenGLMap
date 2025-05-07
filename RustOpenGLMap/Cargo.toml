@@ -8,6 +8,5 @@ sdl2 = "0.37"
 gl = "0.14.0"   # For OpenGL function loading
 
 [build-dependencies]
-pkg-config = "0.3.27"
 
 
