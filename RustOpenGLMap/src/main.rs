@@ -22,8 +22,7 @@ fn main() -> Result<(), String> {
 
     let _gl_context: GLContext = window.gl_create_context()?;
     gl::load_with(|s| video_subsystem.gl_get_proc_address(s) as *const _);
-
-
+    
     println!("Hello, world!");
 
     let mut event_pump = sdl_context.event_pump()?;
@@ -119,6 +118,33 @@ fn main() -> Result<(), String> {
         gl::AttachShader(shader_program, vertex_shader);
         gl::AttachShader(shader_program, frag_shader);
         gl::LinkProgram(shader_program);
+
+        success = 0;
+        gl::GetProgramiv(shader_program, gl::LINK_STATUS, &mut success);
+        if success == 0 {
+            let mut v: Vec<u8> = Vec::with_capacity(1024);
+            let mut log_len = 0_i32;
+            gl::GetProgramInfoLog(
+                shader_program,
+                1024,
+                &mut log_len,
+                v.as_mut_ptr().cast(),
+            );
+            v.set_len(log_len.try_into().unwrap());
+            panic!("Program Link Error: {}", String::from_utf8_lossy(&v));
+        }        
+        else {
+            println!("Shader's Linked Succccesfully");
+        }
+        // clean up
+        gl::DeleteShader(vertex_shader);
+        gl::DeleteShader(frag_shader);
+    }
+
+    unsafe {
+        // Now calls like gl::ClearColor should be recognized
+        gl::ClearColor(0.7, 0.1, 0.5, 1.0);
+        // gl::COLOR_BUFFER_BIT comes from gl::types::GLenum
     }
     
     'running: loop {
@@ -132,14 +158,7 @@ fn main() -> Result<(), String> {
                 _ => {}
             }
         }
-
-        unsafe {
-            // Now calls like gl::ClearColor should be recognized
-            gl::ClearColor(0.2, 0.6, 0.5, 1.0);
-            // gl::COLOR_BUFFER_BIT comes from gl::types::GLenum
-            gl::Clear(gl::COLOR_BUFFER_BIT);
-        }
-
+        
         unsafe {
             let mut vao = 0;
             gl::GenVertexArrays(1, &mut vao);
@@ -171,6 +190,9 @@ fn main() -> Result<(), String> {
                 0 as *const _,
             );
             gl::EnableVertexAttribArray(0);
+            
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+            gl::DrawArrays(gl::TRIANGLES, 0, 3);
         }
         
         window.gl_swap_window();
