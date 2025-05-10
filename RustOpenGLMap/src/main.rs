@@ -5,6 +5,16 @@ use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::video::{self, GLContext};
 
+type Vertex = [f32; 3];
+const VERTICES: [Vertex; 3] = [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]];
+
+const VERT_SHADER: &str = r#"#version 410 core
+  layout (location = 0) in vec3 pos;
+  void main() {
+    gl_Position = vec4(pos.x, pos.y, pos.z, 1.0);
+  }
+"#;
+
 fn main() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
@@ -28,21 +38,11 @@ fn main() -> Result<(), String> {
 
     let mut event_pump = sdl_context.event_pump()?;
 
-    type Vertex = [f32; 3];
-    const VERTICES: [Vertex; 3] = [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]];
-
     // compile vertex shader
 
     unsafe {
         let vertex_shader = gl::CreateShader(gl::VERTEX_SHADER);
         assert_ne!(vertex_shader, 0);
-
-        const VERT_SHADER: &str = r#"#version 410 core
-  layout (location = 0) in vec3 pos;
-  void main() {
-    gl_Position = vec4(pos.x, pos.y, pos.z, 1.0);
-  }
-"#;
 
         gl::ShaderSource(
             vertex_shader,
