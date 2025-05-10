@@ -6,7 +6,8 @@ edition = "2024"
 [dependencies]
 sdl2 = "0.37"
 gl = "0.14.0"
-bytemuck = "1.23.0"   # For OpenGL function loading
+bytemuck = "1.23.0"
+image = "0.25.6"   # For OpenGL function loading
 
 [build-dependencies]
 

@@ -1,6 +1,8 @@
 extern crate gl;
 
 use crate::opengl_helper;
+use gl::types::*;
+use image::RgbaImage;
 
 /// Represents a vertex array object (VAO) in OpenGL.
 ///
@@ -195,4 +197,57 @@ impl ShaderProgram {
     pub fn delete(self) {
         unsafe { gl::DeleteProgram(self.0) };
     }
+}
+
+pub fn create_texture_from_bitmap(bitmap: &RgbaImage) -> GLuint {
+    let mut texture: GLuint = 0;
+
+    let (width, height) = (bitmap.width(), bitmap.height());
+    let pixels = bitmap.as_raw(); // Gets &[u8] of pixel data
+
+    unsafe {
+        gl::GenTextures(1, &mut texture);
+        gl::BindTexture(gl::TEXTURE_2D, texture);
+
+        // Texture wrapping
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::REPEAT as GLint);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::REPEAT as GLint);
+
+        // Texture filtering
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as GLint);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as GLint);
+
+        // Upload texture data
+        gl::TexImage2D(
+            gl::TEXTURE_2D,
+            0,                 // mipmap level
+            gl::RGBA as GLint, // internal format
+            width as GLsizei,
+            height as GLsizei,
+            0,                 // border
+            gl::RGBA,          // input format
+            gl::UNSIGNED_BYTE, // input type
+            pixels.as_ptr() as *const GLvoid,
+        );
+
+        gl::GenerateMipmap(gl::TEXTURE_2D);
+    }
+
+    texture
+}
+
+/// The polygon display modes you can set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolygonMode {
+    /// Just show the points.
+    Point = gl::POINT as isize,
+    /// Just show the lines.
+    Line = gl::LINE as isize,
+    /// Fill in the polygons.
+    Fill = gl::FILL as isize,
+}
+
+/// Sets the font and back polygon mode to the mode given.
+pub fn polygon_mode(mode: PolygonMode) {
+    unsafe { gl::PolygonMode(gl::FRONT_AND_BACK, mode as GLenum) };
 }
