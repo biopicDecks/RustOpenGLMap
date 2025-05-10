@@ -22,6 +22,33 @@ const FRAG_SHADER: &str = r#"#version 410 core
   }
 "#;
 
+fn compile_shader(shader_type: gl::types::GLenum, shader_code: &str) -> gl::types::GLenum {
+    unsafe {
+        let shader = gl::CreateShader(shader_type);
+        assert_ne!(shader, 0);
+        gl::ShaderSource(
+            shader,
+            1,
+            &(shader_code.as_bytes().as_ptr().cast()),
+            &(shader_code.len().try_into().unwrap()),
+        );
+        gl::CompileShader(shader);
+
+        let mut success = 0;
+        gl::GetShaderiv(shader, gl::COMPILE_STATUS, &mut success);
+        if success == 0 {
+            let mut v: Vec<u8> = Vec::with_capacity(1024);
+            let mut log_len = 0_i32;
+            gl::GetShaderInfoLog(shader, 1024, &mut log_len, v.as_mut_ptr().cast());
+            v.set_len(log_len.try_into().unwrap());
+            panic!("Compile Error: {}", String::from_utf8_lossy(&v));
+        } else {
+            println!("Shader Compiled Succccesfully");
+        }
+        shader
+    }
+}
+
 fn main() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
@@ -79,56 +106,15 @@ fn main() -> Result<(), String> {
         gl::EnableVertexAttribArray(0);
 
         // Vertex Shader
-        let vertex_shader = gl::CreateShader(gl::VERTEX_SHADER);
-        assert_ne!(vertex_shader, 0);
-        gl::ShaderSource(
-            vertex_shader,
-            1,
-            &(VERT_SHADER.as_bytes().as_ptr().cast()),
-            &(VERT_SHADER.len().try_into().unwrap()),
-        );
-        gl::CompileShader(vertex_shader);
-
-        let mut success = 0;
-        gl::GetShaderiv(vertex_shader, gl::COMPILE_STATUS, &mut success);
-        if success == 0 {
-            let mut v: Vec<u8> = Vec::with_capacity(1024);
-            let mut log_len = 0_i32;
-            gl::GetShaderInfoLog(vertex_shader, 1024, &mut log_len, v.as_mut_ptr().cast());
-            v.set_len(log_len.try_into().unwrap());
-            panic!("Vertex Compile Error: {}", String::from_utf8_lossy(&v));
-        } else {
-            println!("Vertex Shader Compiled Succccesfully");
-        }
-
-        // compile fragment shader
-        let frag_shader = gl::CreateShader(gl::FRAGMENT_SHADER);
-        assert_ne!(frag_shader, 0);
-        gl::ShaderSource(
-            frag_shader,
-            1,
-            &(FRAG_SHADER.as_bytes().as_ptr().cast()),
-            &(FRAG_SHADER.len().try_into().unwrap()),
-        );
-        gl::CompileShader(frag_shader);
-        success = 0;
-        gl::GetShaderiv(frag_shader, gl::COMPILE_STATUS, &mut success);
-        if success == 0 {
-            let mut v: Vec<u8> = Vec::with_capacity(1024);
-            let mut log_len = 0_i32;
-            gl::GetShaderInfoLog(frag_shader, 1024, &mut log_len, v.as_mut_ptr().cast());
-            v.set_len(log_len.try_into().unwrap());
-            panic!("Fragment Compile Error: {}", String::from_utf8_lossy(&v));
-        } else {
-            println!("Fragment Shader Compiled Succccesfully");
-        }
+        let vertex_shader = compile_shader(gl::VERTEX_SHADER, VERT_SHADER);
+        let frag_shader = compile_shader(gl::FRAGMENT_SHADER, FRAG_SHADER);
 
         // create shader programme
         let shader_program = gl::CreateProgram();
         gl::AttachShader(shader_program, vertex_shader);
         gl::AttachShader(shader_program, frag_shader);
         gl::LinkProgram(shader_program);
-        success = 0;
+        let mut success = 0;
         gl::GetProgramiv(shader_program, gl::LINK_STATUS, &mut success);
         if success == 0 {
             let mut v: Vec<u8> = Vec::with_capacity(1024);
