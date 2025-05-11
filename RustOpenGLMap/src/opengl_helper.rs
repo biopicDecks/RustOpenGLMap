@@ -1,6 +1,10 @@
 extern crate gl;
 
 use crate::opengl_helper;
+use crate::tile::TilePos;
+use crate::viewport::Viewport;
+use lru::LruCache;
+
 use curl::easy::Easy;
 use gl::types::*;
 use image::ImageReader;
@@ -11,6 +15,11 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use once_cell::sync::Lazy;
+macro_rules! c_str {
+    ($s:expr) => {
+        concat!($s, "\0").as_ptr() as *const gl::types::GLchar
+    };
+}
 
 pub static USER_AGENT: Lazy<String> = Lazy::new(|| {
     format!(
@@ -226,7 +235,7 @@ pub fn load_image(path: &str) -> image::RgbaImage {
     rgba_image
 }
 pub fn fetch_tile_from_server(
-    z: u32,
+    z: u8,
     x: u32,
     y: u32,
     i: u8,
@@ -304,7 +313,7 @@ pub fn fetch_tile_from_server(
     img_save.save(disk)?;
     Ok(img)
 }
-pub fn fetch_tile(z: u32, x: u32, y: u32, i: u8) -> Result<RgbaImage, Box<dyn Error>> {
+pub fn fetch_tile(z: u8, x: u32, y: u32, i: u8) -> Result<RgbaImage, Box<dyn Error>> {
     let disk: PathBuf;
     if i == 0 {
         disk = format!("Tiles/OSMTile_{}_{}_{}.png", z, x, y).into();
@@ -386,4 +395,88 @@ pub enum PolygonMode {
 /// Sets the font and back polygon mode to the mode given.
 pub fn polygon_mode(mode: PolygonMode) {
     unsafe { gl::PolygonMode(gl::FRONT_AND_BACK, mode as GLenum) };
+}
+
+pub fn create_texture(tile: TilePos, map: u8) -> gl::types::GLuint {
+    let bitmap = opengl_helper::fetch_tile(tile.z, tile.x, tile.y, map).unwrap_or_else(|e| {
+        eprintln!(
+            "Failed to fetch tile {}/{}/{}: {}",
+            tile.z, tile.x, tile.y, e
+        );
+        load_image("test.png") // your own function returning RgbaImage
+    });
+    create_texture_from_bitmap(&bitmap)
+}
+
+pub fn draw_visible_tiles(
+    vp: &mut Viewport,
+    win_w: u32,
+    win_h: u32,
+    shader: u32, // program id
+    vao: u32,
+    textures: &mut LruCache<TilePos, gl::types::GLuint>,
+    map: u8,
+) {
+    unsafe {
+        gl::UseProgram(shader);
+    }
+
+    // tile-size expressed in Normalised Device Coordinates
+    let scale_x = (256.0 / win_w as f64) * 2.0;
+    let scale_y = (256.0 / win_h as f64) * 2.0;
+
+    let scale_loc = unsafe { gl::GetUniformLocation(shader, c_str!("u_scale")) };
+    let offset_loc = unsafe { gl::GetUniformLocation(shader, c_str!("u_offset")) };
+    let texture_loc = unsafe { gl::GetUniformLocation(shader, c_str!("the_texture")) }; // Get location
+
+    unsafe {
+        gl::Uniform2f(scale_loc, scale_x as f32, scale_y as f32);
+        gl::Uniform1i(texture_loc, 0); // Tell "the_texture" to use texture unit 0
+    }
+
+    // how many tiles we need around the centre
+    let tiles_x = (win_w as f64 / 256.0).ceil() as i32 + 2;
+    let tiles_y = (win_h as f64 / 256.0).ceil() as i32 + 2;
+
+    unsafe {
+        gl::ActiveTexture(gl::TEXTURE0);
+        gl::BindVertexArray(vao);
+    }
+    let z_max = (1 << vp.z) - 1;
+    let m_y = vp.center_y.floor() - tiles_y as f64 / 2.0;
+    let ma_y = vp.center_y.ceil() + tiles_y as f64 / 2.0;
+    let m_x = vp.center_x.floor() - tiles_x as f64 / 2.0;
+    let ma_x = vp.center_x.ceil() + tiles_x as f64 / 2.0;
+    for ty in m_y as i32..=ma_y as i32 {
+        for tx in m_x as i32..=ma_x as i32 {
+            if tx < 0 || ty < 0 {
+                continue;
+            }
+            if tx > z_max || ty > z_max {
+                continue;
+            }
+
+            let pos = TilePos {
+                z: vp.z,
+                x: tx as u32,
+                y: ty as u32,
+                m: map,
+            };
+            // get or download the texture for this tile -------------
+            let tex_id = *textures.get_or_insert(pos, || create_texture(pos, map));
+            let dx = tx as f64 - vp.center_x;
+            let dy = ty as f64 - vp.center_y;
+            // set per-tile translation in NDC -----------------------
+            let ofs_x = (dx) * scale_x;
+            let ofs_y = -(dy) * scale_y; // window Y is flipped
+            unsafe {
+                gl::Uniform2f(offset_loc, ofs_x as f32, ofs_y as f32);
+            }
+
+            unsafe {
+                gl::BindTexture(gl::TEXTURE_2D, tex_id);
+                gl::DrawElements(gl::TRIANGLES, 6, gl::UNSIGNED_INT, std::ptr::null());
+            }
+        }
+    }
 }

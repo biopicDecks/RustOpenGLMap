@@ -10,6 +10,8 @@ bytemuck = "1.23.0"
 image = "0.25.6"   # For OpenGL function loading
 curl = "0.4.47"
 once_cell = "1.21.3"# for image streaming
+lru = "0.14.0"
+
 [build-dependencies]
 
 

@@ -1,12 +1,17 @@
 extern crate gl;
 mod opengl_helper;
+mod tile;
 mod viewport;
 
+use lru::LruCache;
 use sdl2;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::mouse::MouseButton;
 use sdl2::video::{self, GLContext};
+use std::num::NonZeroUsize;
+use tile::TilePos;
+use viewport::Viewport;
 
 type Vertex = [f32; 3 + 3 + 2];
 type TriIndexes = [u32; 3];
@@ -24,88 +29,29 @@ const VERTICES: [Vertex; 4] = [
 const INDICES: [TriIndexes; 2] = [[0, 1, 3], [1, 2, 3]];
 
 const VERT_SHADER: &str = r#"#version 410 core
-  layout (location = 0) in vec3 pos;
-  layout (location = 1) in vec3 color;
-  layout (location = 2) in vec2 tex;
+layout (location = 0) in vec3 pos;
+layout (location = 2) in vec2 tex;
 
-  out vec4 frag_color;
-  out vec2 frag_tex;
+uniform vec2 u_scale;   // tile-size in NDC
+uniform vec2 u_offset;  // per-tile translation in NDC
 
-  void main() {
-    gl_Position = vec4(pos, 1.0);
-    frag_color = vec4(color, 1.0);
-    frag_tex = tex;
-  }
+out vec2 v_tex;
+
+void main() {
+    vec2 scaled     = pos.xy * u_scale;
+    vec2 translated = scaled  + u_offset;
+    gl_Position = vec4(translated, pos.z, 1.0);
+    v_tex       = tex;
+}
+
 "#;
 
 const FRAG_SHADER: &str = r#"#version 410 core
-  uniform sampler2D the_texture;
-
-  in vec4 frag_color;
-  in vec2 frag_tex;
-
-  out vec4 final_color;
-
-  void main() {
-    final_color = texture(the_texture, frag_tex);
-  }
+uniform sampler2D the_texture;
+in  vec2 v_tex;
+out vec4 final_color;
+void main() { final_color = texture(the_texture, v_tex); }
 "#;
-
-#[derive(Debug)]
-struct Viewport {
-    z: u32,
-    center_x: f64,
-    center_y: f64,
-}
-#[derive(Debug)]
-struct TilePos {
-    z: u32,
-    x: u32,
-    y: u32,
-}
-
-impl TilePos {
-    fn new() -> Self {
-        Self { z: 0, x: 0, y: 0 }
-    }
-
-    /// Return the child tile that lies under (u,v) in [0,1]².
-    /// SDL’s Y axis grows downward, OSM’s Y grows *down*, too,
-    /// so no extra flip is needed.
-    fn zoom_in(&mut self, u: f64, v: f64) {
-        if self.z >= 19 {
-            return;
-        } // OSM max
-        self.x = self.x * 2 + if u >= 0.5 { 1 } else { 0 };
-        self.y = self.y * 2 + if v >= 0.5 { 1 } else { 0 };
-        self.z += 1;
-    }
-}
-
-impl Viewport {
-    fn pan(&mut self, dx: f64, dy: f64) {
-        self.center_x += dx;
-        self.center_y += dy;
-        self.center_x = self.center_x.clamp(0.0, (1 << self.z) as f64 - 1.0);
-        self.center_y = self.center_y.clamp(0.0, (1 << self.z) as f64 - 1.0);
-    }
-
-    fn zoom_in(&mut self) {
-        if self.z < 19 {
-            self.center_x *= 2.0;
-            self.center_y *= 2.0;
-            self.z += 1;
-        }
-    }
-
-    fn zoom_out(&mut self) {
-        if self.z > 0 {
-            self.center_x /= 2.0;
-            self.center_y /= 2.0;
-            self.z -= 1;
-        }
-    }
-}
 
 fn main() -> Result<(), String> {
     //let bitmap1 = opengl_helper::load_image("test.png");
@@ -159,7 +105,7 @@ fn main() -> Result<(), String> {
         gl::STATIC_DRAW,
     );
 
-    let _ = opengl_helper::ShaderProgram::from_vert_frag(VERT_SHADER, FRAG_SHADER)?;
+    let shader_program = opengl_helper::ShaderProgram::from_vert_frag(VERT_SHADER, FRAG_SHADER)?;
     unsafe {
         // position
         gl::VertexAttribPointer(
@@ -206,14 +152,18 @@ fn main() -> Result<(), String> {
         );
         opengl_helper::load_image("test.png") // your own function returning RgbaImage
     });
+
     let mut viewport = Viewport {
-        z: 2,
-        center_x: 2.0,
-        center_y: 2.0,
+        z: 1,
+        center_x: 1.0,
+        center_y: 1.0,
+        rm_x: 0.0,
+        rm_y: 0.0,
     };
 
     let _ = opengl_helper::create_texture_from_bitmap(&bitmap1);
-
+    let mut tile_cache: LruCache<TilePos, gl::types::GLuint> =
+        LruCache::new(NonZeroUsize::new(64).unwrap());
     //let c_str = CString::new("uni_color").unwrap();
     //let p: *const c_char = c_str.as_ptr();
     //let uni_color_loc = unsafe { gl::GetUniformLocation(shader_program.0, p) };
@@ -230,19 +180,19 @@ fn main() -> Result<(), String> {
                 Event::KeyDown {
                     keycode: Some(Keycode::W),
                     ..
-                } => viewport.pan(0.0, -1.0),
+                } => viewport.pan(0.0, -0.25),
                 Event::KeyDown {
                     keycode: Some(Keycode::S),
                     ..
-                } => viewport.pan(0.0, 1.0),
+                } => viewport.pan(0.0, 0.25),
                 Event::KeyDown {
                     keycode: Some(Keycode::A),
                     ..
-                } => viewport.pan(-1.0, 0.0),
+                } => viewport.pan(-0.25, 0.0),
                 Event::KeyDown {
                     keycode: Some(Keycode::D),
                     ..
-                } => viewport.pan(1.0, 0.0),
+                } => viewport.pan(0.25, 0.0),
                 Event::KeyDown {
                     keycode: Some(Keycode::Up),
                     ..
@@ -260,13 +210,6 @@ fn main() -> Result<(), String> {
                     } else {
                         map = 0;
                     }
-                    let bitmap = opengl_helper::fetch_tile(tile.z, tile.x, tile.y, map)
-                        .unwrap_or_else(|e| {
-                            eprintln!("Tile error: {e}");
-                            opengl_helper::load_image("test.png")
-                        });
-
-                    let _ = opengl_helper::create_texture_from_bitmap(&bitmap);
                 }
                 Event::MouseButtonDown {
                     mouse_btn: MouseButton::Left,
@@ -274,53 +217,15 @@ fn main() -> Result<(), String> {
                     x,
                     y,
                     ..
-                } if clicks_in_event >= 2 => {
-                    let (w, h) = window.size(); // u32s
-                    let u = x as f64 / w as f64; // 0.0 … 1.0
-                    let v = y as f64 / h as f64;
-
-                    tile.zoom_in(u, v);
-                    println!("Zoomed to {:?}", tile);
-
-                    // fetch & upload the new tile, re‑using the same texture object
-                    let bitmap = opengl_helper::fetch_tile(tile.z, tile.x, tile.y, map)
-                        .unwrap_or_else(|e| {
-                            eprintln!("Tile error: {e}");
-                            opengl_helper::load_image("test.png")
-                        });
-
-                    let _ = opengl_helper::create_texture_from_bitmap(&bitmap);
-                    // └── you just need a helper that binds `texture`, calls glTexSubImage2D or glTexImage2D.
+                } => {
+                    let (w, h) = window.size();
+                    if clicks_in_event >= 2 {
+                        viewport.zoom_in_at_pixel(w, h, x, y);
+                    } else {
+                        // clicks == 1
+                        viewport.center_on_pixel(w, h, x, y);
+                    }
                 }
-
-                // | Event::KeyDown {
-                //     keycode: Some(Keycode::Up),
-                //     ..
-                // } => {
-                //     zoom_level += 1;
-                //     zoom_level = std::cmp::min(zoom_level,19);
-                //     let bitmap = opengl_helper::fetch_tile(zoom_level as u32, 0, 0).unwrap_or_else(|e| {
-                //         eprintln!("Failed to fetch tile {}/{}/{}: {}", zoom_level, 0, 0, e);
-                //         opengl_helper::load_image("test.png")        // your own function returning RgbaImage
-                //     });
-                //     let _ =opengl_helper::create_texture_from_bitmap(&bitmap);
-                //
-                //     // `bitmap` dropped here, memory freed
-                // }
-                // | Event::KeyDown {
-                //     keycode: Some(Keycode::Down),
-                //     ..
-                // } => {
-                //     zoom_level -= 1;
-                //     zoom_level = std::cmp::max(zoom_level,0);
-                //     let bitmap = opengl_helper::fetch_tile(zoom_level as u32, 0, 0).unwrap_or_else(|e| {
-                //         eprintln!("Failed to fetch tile {}/{}/{}: {}", zoom_level, 0, 0, e);
-                //         opengl_helper::load_image("test.png")        // your own function returning RgbaImage
-                //     });
-                //     let _ =opengl_helper::create_texture_from_bitmap(&bitmap);
-                //
-                //     // `bitmap` dropped here, memory freed
-                // }
                 _ => {}
             }
         }
@@ -329,10 +234,19 @@ fn main() -> Result<(), String> {
         unsafe {
             gl::Clear(gl::COLOR_BUFFER_BIT);
             //gl::Uniform4f(uni_color_loc, 0.1, green, 0.1, 1.0);
-            gl::DrawElements(gl::TRIANGLES, 6, gl::UNSIGNED_INT, 0 as *const _);
+            //gl::DrawElements(gl::TRIANGLES, 6, gl::UNSIGNED_INT, 0 as *const _);
         }
+        opengl_helper::draw_visible_tiles(
+            &mut viewport,
+            window.size().0,
+            window.size().1,
+            shader_program.0,
+            vao.0,
+            &mut tile_cache,
+            map,
+        );
         window.gl_swap_window();
-        ::std::thread::sleep(std::time::Duration::new(0, 1_000_000_000u32 / 60));
+        ::std::thread::sleep(std::time::Duration::new(0, (1_000_000_000 / 60) as u32));
     }
 
     Ok(())
