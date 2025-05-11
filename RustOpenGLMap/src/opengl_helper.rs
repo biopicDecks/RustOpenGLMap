@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use once_cell::sync::Lazy;
+
 pub static USER_AGENT: Lazy<String> = Lazy::new(|| {
     format!(
         "{}/{} (+{}; {})",
@@ -224,38 +225,92 @@ pub fn load_image(path: &str) -> image::RgbaImage {
     image::imageops::flip_vertical_in_place(&mut rgba_image);
     rgba_image
 }
-pub fn fetch_tile_from_server(z: u32, x: u32, y: u32) -> Result<DynamicImage, Box<dyn Error>> {
-    let url = format!("https://tile.openstreetmap.org/{}/{}/{}.png", z, x, y);
-
+pub fn fetch_tile_from_server(
+    z: u32,
+    x: u32,
+    y: u32,
+    i: u8,
+) -> Result<DynamicImage, Box<dyn Error>> {
     // Pre‑allocate ~8KiB to avoid repeated reallocations for small tiles.
     let mut data: Vec<u8> = Vec::with_capacity(8 * 1024);
 
     // --- libcurl setup -----------------------------------------------------
     let mut easy = Easy::new();
-    easy.url(&url)?;
-    easy.follow_location(true)?;
-    easy.useragent(&USER_AGENT)?; // <- sets the HTTP User‑Agent header
 
-    // --- Perform the HTTP GET ---------------------------------------------
-    {
-        let mut transfer = easy.transfer();
-        transfer.write_function(|chunk| {
-            data.write_all(chunk).unwrap();
-            Ok(chunk.len())
-        })?;
-        transfer.perform()?; // propagate any HTTP/network error
+    let mut content_type = String::new();
+    let mut response_code = 0;
+
+    let mut count = 0;
+
+    while response_code != 200 && (i == 1 && count == 0) || (i == 0 && count == 0) {
+        let url;
+        if i == 0 {
+            url = format!("https://tile.openstreetmap.org/{}/{}/{}.png", z, x, y);
+        } else {
+            url = format!(
+                "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{}/{}/{}",
+                z, y, x
+            );
+        }
+        easy.url(&url)?;
+        easy.follow_location(true)?;
+        easy.useragent(&USER_AGENT)?; // <- sets the HTTP User‑Agent header
+        // --- Perform the HTTP GET ---------------------------------------------
+        {
+            let mut transfer = easy.transfer();
+
+            transfer.header_function(|header| {
+                let header_str = String::from_utf8_lossy(header);
+                if header_str.to_ascii_lowercase().starts_with("content-type:") {
+                    content_type = header_str["content-type:".len()..].trim().to_string();
+                }
+                true
+            })?;
+
+            transfer.write_function(|chunk| {
+                data.write_all(chunk).unwrap();
+                Ok(chunk.len())
+            })?;
+            transfer.perform()?; // propagate any HTTP/network error
+        }
+        response_code = easy.response_code().unwrap_or(0);
+
+        if response_code != 200 && i != 0 {
+            return Err(Box::from(format!("HTTP error: {}", response_code)));
+        }
+
+        if data.len() < 4 && i != 0 {
+            return Err(Box::from(
+                "Downloaded data too small to be valid image".to_string(),
+            ));
+        }
+
+        // must be a png or jpg
+        if &data[0..4] != b"\x89PNG" && &data[0..2] != b"\xFF\xD8" {
+            return Err(Box::from("Not a PNG or JPEG".to_string()));
+        }
+
+        count = count + 1;
     }
-
     // --- Decode PNG into RGBA8 --------------------------------------------
     let img = image::load_from_memory(&data)?;
     let img_save = img.to_rgba8();
-
-    let disk: PathBuf = format!("Tiles/OSMTile_{}_{}_{}.png", z, x, y).into();
+    let disk: PathBuf;
+    if i == 0 {
+        disk = format!("Tiles/OSMTile_{}_{}_{}.png", z, x, y).into();
+    } else {
+        disk = format!("Tiles/ESRITile_{}_{}_{}.png", z, x, y).into();
+    }
     img_save.save(disk)?;
     Ok(img)
 }
-pub fn fetch_tile(z: u32, x: u32, y: u32) -> Result<RgbaImage, Box<dyn Error>> {
-    let disk: PathBuf = format!("Tiles/OSMTile_{}_{}_{}.png", z, x, y).into();
+pub fn fetch_tile(z: u32, x: u32, y: u32, i: u8) -> Result<RgbaImage, Box<dyn Error>> {
+    let disk: PathBuf;
+    if i == 0 {
+        disk = format!("Tiles/OSMTile_{}_{}_{}.png", z, x, y).into();
+    } else {
+        disk = format!("Tiles/ESRITile_{}_{}_{}.png", z, x, y).into();
+    }
     if disk.exists() {
         println!("load from disk");
         let img = ImageReader::open(&disk)?
@@ -266,14 +321,14 @@ pub fn fetch_tile(z: u32, x: u32, y: u32) -> Result<RgbaImage, Box<dyn Error>> {
                     "Failed to open tile, loading from web {}_{}_{}: {}",
                     z, x, y, e
                 );
-                fetch_tile_from_server(z, x, y).unwrap() // your own function returning RgbaImage
+                fetch_tile_from_server(z, x, y, i).unwrap() // your own function returning RgbaImage
             }); // dynamic image
         let mut img_rgba = img.to_rgba8(); // hard‑convert to RGBA8
         image::imageops::flip_vertical_in_place(&mut img_rgba); // GL wants origin‑bottom‑left
         Ok(img_rgba)
     } else {
         println!("load from server");
-        let mut img_rgba = fetch_tile_from_server(z, x, y)?.to_rgba8();
+        let mut img_rgba = fetch_tile_from_server(z, x, y, i)?.to_rgba8();
         image::imageops::flip_vertical_in_place(&mut img_rgba); // GL wants origin‑bottom‑left
         Ok(img_rgba)
     }

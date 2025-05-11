@@ -1,5 +1,6 @@
 extern crate gl;
 mod opengl_helper;
+mod viewport;
 
 use sdl2;
 use sdl2::event::Event;
@@ -51,6 +52,12 @@ const FRAG_SHADER: &str = r#"#version 410 core
 "#;
 
 #[derive(Debug)]
+struct Viewport {
+    z: u32,
+    center_x: f64,
+    center_y: f64,
+}
+#[derive(Debug)]
 struct TilePos {
     z: u32,
     x: u32,
@@ -72,6 +79,31 @@ impl TilePos {
         self.x = self.x * 2 + if u >= 0.5 { 1 } else { 0 };
         self.y = self.y * 2 + if v >= 0.5 { 1 } else { 0 };
         self.z += 1;
+    }
+}
+
+impl Viewport {
+    fn pan(&mut self, dx: f64, dy: f64) {
+        self.center_x += dx;
+        self.center_y += dy;
+        self.center_x = self.center_x.clamp(0.0, (1 << self.z) as f64 - 1.0);
+        self.center_y = self.center_y.clamp(0.0, (1 << self.z) as f64 - 1.0);
+    }
+
+    fn zoom_in(&mut self) {
+        if self.z < 19 {
+            self.center_x *= 2.0;
+            self.center_y *= 2.0;
+            self.z += 1;
+        }
+    }
+
+    fn zoom_out(&mut self) {
+        if self.z > 0 {
+            self.center_x /= 2.0;
+            self.center_y /= 2.0;
+            self.z -= 1;
+        }
     }
 }
 
@@ -164,16 +196,21 @@ fn main() -> Result<(), String> {
 
         opengl_helper::polygon_mode(opengl_helper::PolygonMode::Fill);
     }
+    let mut map = 0;
 
     let mut tile = TilePos::new();
-
-    let bitmap1 = opengl_helper::fetch_tile(tile.z, tile.x, tile.y).unwrap_or_else(|e| {
+    let bitmap1 = opengl_helper::fetch_tile(tile.z, tile.x, tile.y, map).unwrap_or_else(|e| {
         eprintln!(
             "Failed to fetch tile {}/{}/{}: {}",
             tile.z, tile.x, tile.y, e
         );
         opengl_helper::load_image("test.png") // your own function returning RgbaImage
     });
+    let mut viewport = Viewport {
+        z: 2,
+        center_x: 2.0,
+        center_y: 2.0,
+    };
 
     let _ = opengl_helper::create_texture_from_bitmap(&bitmap1);
 
@@ -190,6 +227,47 @@ fn main() -> Result<(), String> {
                 } => {
                     break 'running;
                 }
+                Event::KeyDown {
+                    keycode: Some(Keycode::W),
+                    ..
+                } => viewport.pan(0.0, -1.0),
+                Event::KeyDown {
+                    keycode: Some(Keycode::S),
+                    ..
+                } => viewport.pan(0.0, 1.0),
+                Event::KeyDown {
+                    keycode: Some(Keycode::A),
+                    ..
+                } => viewport.pan(-1.0, 0.0),
+                Event::KeyDown {
+                    keycode: Some(Keycode::D),
+                    ..
+                } => viewport.pan(1.0, 0.0),
+                Event::KeyDown {
+                    keycode: Some(Keycode::Up),
+                    ..
+                } => viewport.zoom_in(),
+                Event::KeyDown {
+                    keycode: Some(Keycode::Down),
+                    ..
+                } => viewport.zoom_out(),
+                Event::KeyDown {
+                    keycode: Some(Keycode::M),
+                    ..
+                } => {
+                    if map == 0 {
+                        map = 1;
+                    } else {
+                        map = 0;
+                    }
+                    let bitmap = opengl_helper::fetch_tile(tile.z, tile.x, tile.y, map)
+                        .unwrap_or_else(|e| {
+                            eprintln!("Tile error: {e}");
+                            opengl_helper::load_image("test.png")
+                        });
+
+                    let _ = opengl_helper::create_texture_from_bitmap(&bitmap);
+                }
                 Event::MouseButtonDown {
                     mouse_btn: MouseButton::Left,
                     clicks: clicks_in_event,
@@ -205,8 +283,8 @@ fn main() -> Result<(), String> {
                     println!("Zoomed to {:?}", tile);
 
                     // fetch & upload the new tile, re‑using the same texture object
-                    let bitmap =
-                        opengl_helper::fetch_tile(tile.z, tile.x, tile.y).unwrap_or_else(|e| {
+                    let bitmap = opengl_helper::fetch_tile(tile.z, tile.x, tile.y, map)
+                        .unwrap_or_else(|e| {
                             eprintln!("Tile error: {e}");
                             opengl_helper::load_image("test.png")
                         });
