@@ -1,9 +1,25 @@
 extern crate gl;
 
 use crate::opengl_helper;
+use curl::easy::Easy;
 use gl::types::*;
-use image::RgbaImage;
+use image::ImageReader;
+use image::{DynamicImage, RgbaImage};
+use std::error::Error;
+// curl = "0.4"
+use std::io::Write;
+use std::path::PathBuf;
 
+use once_cell::sync::Lazy;
+pub static USER_AGENT: Lazy<String> = Lazy::new(|| {
+    format!(
+        "{}/{} (+{}; {})",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        "https://github.com/biopicDecks/RustOpenGLMap",
+        "biopic.decks-0w@icloud.com"
+    )
+});
 /// Represents a vertex array object (VAO) in OpenGL.
 ///
 /// A VAO stores the state of vertex attribute pointers, allowing for efficient rendering
@@ -198,6 +214,70 @@ impl ShaderProgram {
         unsafe { gl::DeleteProgram(self.0) };
     }
 }
+pub fn load_image(path: &str) -> image::RgbaImage {
+    let img = ImageReader::open(path)
+        .expect("Failed to open image")
+        .decode()
+        .expect("Failed to decode image");
+    let mut rgba_image = img.to_rgba8();
+    // Flip scanlines (vertical flip) if needed
+    image::imageops::flip_vertical_in_place(&mut rgba_image);
+    rgba_image
+}
+pub fn fetch_tile_from_server(z: u32, x: u32, y: u32) -> Result<DynamicImage, Box<dyn Error>> {
+    let url = format!("https://tile.openstreetmap.org/{}/{}/{}.png", z, x, y);
+
+    // Pre‑allocate ~8KiB to avoid repeated reallocations for small tiles.
+    let mut data: Vec<u8> = Vec::with_capacity(8 * 1024);
+
+    // --- libcurl setup -----------------------------------------------------
+    let mut easy = Easy::new();
+    easy.url(&url)?;
+    easy.follow_location(true)?;
+    easy.useragent(&USER_AGENT)?; // <- sets the HTTP User‑Agent header
+
+    // --- Perform the HTTP GET ---------------------------------------------
+    {
+        let mut transfer = easy.transfer();
+        transfer.write_function(|chunk| {
+            data.write_all(chunk).unwrap();
+            Ok(chunk.len())
+        })?;
+        transfer.perform()?; // propagate any HTTP/network error
+    }
+
+    // --- Decode PNG into RGBA8 --------------------------------------------
+    let img = image::load_from_memory(&data)?;
+    let img_save = img.to_rgba8();
+
+    let disk: PathBuf = format!("Tiles/OSMTile_{}_{}_{}.png", z, x, y).into();
+    img_save.save(disk)?;
+    Ok(img)
+}
+pub fn fetch_tile(z: u32, x: u32, y: u32) -> Result<RgbaImage, Box<dyn Error>> {
+    let disk: PathBuf = format!("Tiles/OSMTile_{}_{}_{}.png", z, x, y).into();
+    if disk.exists() {
+        println!("load from disk");
+        let img = ImageReader::open(&disk)?
+            .with_guessed_format()? // detect by magic bytes
+            .decode()
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "Failed to open tile, loading from web {}_{}_{}: {}",
+                    z, x, y, e
+                );
+                fetch_tile_from_server(z, x, y).unwrap() // your own function returning RgbaImage
+            }); // dynamic image
+        let mut img_rgba = img.to_rgba8(); // hard‑convert to RGBA8
+        image::imageops::flip_vertical_in_place(&mut img_rgba); // GL wants origin‑bottom‑left
+        Ok(img_rgba)
+    } else {
+        println!("load from server");
+        let mut img_rgba = fetch_tile_from_server(z, x, y)?.to_rgba8();
+        image::imageops::flip_vertical_in_place(&mut img_rgba); // GL wants origin‑bottom‑left
+        Ok(img_rgba)
+    }
+}
 
 pub fn create_texture_from_bitmap(bitmap: &RgbaImage) -> GLuint {
     let mut texture: GLuint = 0;
@@ -208,6 +288,7 @@ pub fn create_texture_from_bitmap(bitmap: &RgbaImage) -> GLuint {
     unsafe {
         gl::GenTextures(1, &mut texture);
         gl::BindTexture(gl::TEXTURE_2D, texture);
+        gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1); // <- makes any width safe
 
         // Texture wrapping
         gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::REPEAT as GLint);

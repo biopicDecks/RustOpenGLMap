@@ -1,11 +1,10 @@
 extern crate gl;
 mod opengl_helper;
 
-use image::DynamicImage;
-use image::ImageReader;
 use sdl2;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
+use sdl2::mouse::MouseButton;
 use sdl2::video::{self, GLContext};
 
 type Vertex = [f32; 3 + 3 + 2];
@@ -51,20 +50,35 @@ const FRAG_SHADER: &str = r#"#version 410 core
   }
 "#;
 
+#[derive(Debug)]
+struct TilePos {
+    z: u32,
+    x: u32,
+    y: u32,
+}
+
+impl TilePos {
+    fn new() -> Self {
+        Self { z: 0, x: 0, y: 0 }
+    }
+
+    /// Return the child tile that lies under (u,v) in [0,1]².
+    /// SDL’s Y axis grows downward, OSM’s Y grows *down*, too,
+    /// so no extra flip is needed.
+    fn zoom_in(&mut self, u: f64, v: f64) {
+        if self.z >= 19 {
+            return;
+        } // OSM max
+        self.x = self.x * 2 + if u >= 0.5 { 1 } else { 0 };
+        self.y = self.y * 2 + if v >= 0.5 { 1 } else { 0 };
+        self.z += 1;
+    }
+}
+
 fn main() -> Result<(), String> {
-    let bitmap = {
-        let img: DynamicImage = ImageReader::open("test.png")
-            .expect("Failed to open image")
-            .decode()
-            .expect("Failed to decode image");
-
-        let mut rgba_image = img.to_rgba8();
-
-        // Flip scanlines (vertical flip) if needed
-        image::imageops::flip_vertical_in_place(&mut rgba_image);
-
-        rgba_image
-    };
+    //let bitmap1 = opengl_helper::load_image("test.png");
+    //let bitmap2 = opengl_helper::load_image("test1.png");
+    //let mut current_bitmap = &bitmap1;
 
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
@@ -113,8 +127,6 @@ fn main() -> Result<(), String> {
         gl::STATIC_DRAW,
     );
 
-    let _ = opengl_helper::create_texture_from_bitmap(&bitmap);
-
     let _ = opengl_helper::ShaderProgram::from_vert_frag(VERT_SHADER, FRAG_SHADER)?;
     unsafe {
         // position
@@ -153,6 +165,18 @@ fn main() -> Result<(), String> {
         opengl_helper::polygon_mode(opengl_helper::PolygonMode::Fill);
     }
 
+    let mut tile = TilePos::new();
+
+    let bitmap1 = opengl_helper::fetch_tile(tile.z, tile.x, tile.y).unwrap_or_else(|e| {
+        eprintln!(
+            "Failed to fetch tile {}/{}/{}: {}",
+            tile.z, tile.x, tile.y, e
+        );
+        opengl_helper::load_image("test.png") // your own function returning RgbaImage
+    });
+
+    let _ = opengl_helper::create_texture_from_bitmap(&bitmap1);
+
     //let c_str = CString::new("uni_color").unwrap();
     //let p: *const c_char = c_str.as_ptr();
     //let uni_color_loc = unsafe { gl::GetUniformLocation(shader_program.0, p) };
@@ -163,7 +187,62 @@ fn main() -> Result<(), String> {
                 | Event::KeyDown {
                     keycode: Some(Keycode::Escape),
                     ..
-                } => break 'running,
+                } => {
+                    break 'running;
+                }
+                Event::MouseButtonDown {
+                    mouse_btn: MouseButton::Left,
+                    clicks: clicks_in_event,
+                    x,
+                    y,
+                    ..
+                } if clicks_in_event >= 2 => {
+                    let (w, h) = window.size(); // u32s
+                    let u = x as f64 / w as f64; // 0.0 … 1.0
+                    let v = y as f64 / h as f64;
+
+                    tile.zoom_in(u, v);
+                    println!("Zoomed to {:?}", tile);
+
+                    // fetch & upload the new tile, re‑using the same texture object
+                    let bitmap =
+                        opengl_helper::fetch_tile(tile.z, tile.x, tile.y).unwrap_or_else(|e| {
+                            eprintln!("Tile error: {e}");
+                            opengl_helper::load_image("test.png")
+                        });
+
+                    let _ = opengl_helper::create_texture_from_bitmap(&bitmap);
+                    // └── you just need a helper that binds `texture`, calls glTexSubImage2D or glTexImage2D.
+                }
+
+                // | Event::KeyDown {
+                //     keycode: Some(Keycode::Up),
+                //     ..
+                // } => {
+                //     zoom_level += 1;
+                //     zoom_level = std::cmp::min(zoom_level,19);
+                //     let bitmap = opengl_helper::fetch_tile(zoom_level as u32, 0, 0).unwrap_or_else(|e| {
+                //         eprintln!("Failed to fetch tile {}/{}/{}: {}", zoom_level, 0, 0, e);
+                //         opengl_helper::load_image("test.png")        // your own function returning RgbaImage
+                //     });
+                //     let _ =opengl_helper::create_texture_from_bitmap(&bitmap);
+                //
+                //     // `bitmap` dropped here, memory freed
+                // }
+                // | Event::KeyDown {
+                //     keycode: Some(Keycode::Down),
+                //     ..
+                // } => {
+                //     zoom_level -= 1;
+                //     zoom_level = std::cmp::max(zoom_level,0);
+                //     let bitmap = opengl_helper::fetch_tile(zoom_level as u32, 0, 0).unwrap_or_else(|e| {
+                //         eprintln!("Failed to fetch tile {}/{}/{}: {}", zoom_level, 0, 0, e);
+                //         opengl_helper::load_image("test.png")        // your own function returning RgbaImage
+                //     });
+                //     let _ =opengl_helper::create_texture_from_bitmap(&bitmap);
+                //
+                //     // `bitmap` dropped here, memory freed
+                // }
                 _ => {}
             }
         }
