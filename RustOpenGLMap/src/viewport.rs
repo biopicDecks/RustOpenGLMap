@@ -3,16 +3,12 @@ pub struct Viewport {
     pub z: u8,
     pub center_x: f64,
     pub center_y: f64,
-    pub rm_x: f64,
-    pub rm_y: f64,
 }
 
 impl Viewport {
     pub fn pan(&mut self, dx: f64, dy: f64) {
         self.center_x += (dx);
         self.center_y += (dy);
-        self.rm_x = 0.0;
-        self.rm_y = 0.0;
     }
 
     pub fn zoom_in(&mut self) {

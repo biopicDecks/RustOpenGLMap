@@ -1,20 +1,23 @@
 extern crate gl;
 
 use crate::opengl_helper;
+use crate::tile::TileLoad;
 use crate::tile::TilePos;
 use crate::viewport::Viewport;
-use lru::LruCache;
-
 use curl::easy::Easy;
 use gl::types::*;
 use image::ImageReader;
-use image::{DynamicImage, RgbaImage};
+use image::RgbaImage;
+use lru::LruCache;
 use std::error::Error;
 // curl = "0.4"
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::mpsc::Sender;
 
 use once_cell::sync::Lazy;
+use tokio;
+
 macro_rules! c_str {
     ($s:expr) => {
         concat!($s, "\0").as_ptr() as *const gl::types::GLchar
@@ -30,6 +33,16 @@ pub static USER_AGENT: Lazy<String> = Lazy::new(|| {
         "biopic.decks-0w@icloud.com"
     )
 });
+
+// Define the result type that worker threads will send back
+#[derive(Debug)] // For easier debugging
+pub enum TileLoadResult {
+    // Original requested TilePos, Image data, Actual TilePos of the loaded image (if fallback)
+    Success(TilePos, RgbaImage, TilePos),
+    // Original requested TilePos, Error message
+    Failure(TilePos, String),
+}
+
 /// Represents a vertex array object (VAO) in OpenGL.
 ///
 /// A VAO stores the state of vertex attribute pointers, allowing for efficient rendering
@@ -234,12 +247,7 @@ pub fn load_image(path: &str) -> image::RgbaImage {
     image::imageops::flip_vertical_in_place(&mut rgba_image);
     rgba_image
 }
-pub fn fetch_tile_from_server(
-    z: u8,
-    x: u32,
-    y: u32,
-    i: u8,
-) -> Result<DynamicImage, Box<dyn Error>> {
+pub fn fetch_tile_from_server(tile: &TilePos) -> Result<TileLoad, Box<dyn Error>> {
     // Pre‑allocate ~8KiB to avoid repeated reallocations for small tiles.
     let mut data: Vec<u8> = Vec::with_capacity(8 * 1024);
 
@@ -251,14 +259,17 @@ pub fn fetch_tile_from_server(
 
     let mut count = 0;
 
-    while response_code != 200 && (i == 1 && count == 0) || (i == 0 && count == 0) {
+    while response_code != 200 && (tile.m == 1 && count == 0) || (tile.m == 0 && count == 0) {
         let url;
-        if i == 0 {
-            url = format!("https://tile.openstreetmap.org/{}/{}/{}.png", z, x, y);
+        if tile.m == 0 {
+            url = format!(
+                "https://tile.openstreetmap.org/{}/{}/{}.png",
+                tile.z, tile.x, tile.y
+            );
         } else {
             url = format!(
                 "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{}/{}/{}",
-                z, y, x
+                tile.z, tile.y, tile.x
             );
         }
         easy.url(&url)?;
@@ -284,11 +295,11 @@ pub fn fetch_tile_from_server(
         }
         response_code = easy.response_code().unwrap_or(0);
 
-        if response_code != 200 && i != 0 {
+        if response_code != 200 {
             return Err(Box::from(format!("HTTP error: {}", response_code)));
         }
 
-        if data.len() < 4 && i != 0 {
+        if data.len() < 4 {
             return Err(Box::from(
                 "Downloaded data too small to be valid image".to_string(),
             ));
@@ -303,44 +314,94 @@ pub fn fetch_tile_from_server(
     }
     // --- Decode PNG into RGBA8 --------------------------------------------
     let img = image::load_from_memory(&data)?;
-    let img_save = img.to_rgba8();
+    let mut img_rgba = img.to_rgba8();
     let disk: PathBuf;
-    if i == 0 {
-        disk = format!("Tiles/OSMTile_{}_{}_{}.png", z, x, y).into();
+    if tile.m == 0 {
+        disk = format!("Tiles/OSMTile_{}_{}_{}.png", tile.z, tile.x, tile.y).into();
     } else {
-        disk = format!("Tiles/ESRITile_{}_{}_{}.png", z, x, y).into();
+        disk = format!("Tiles/ESRITile_{}_{}_{}.png", tile.z, tile.x, tile.y).into();
     }
-    img_save.save(disk)?;
-    Ok(img)
+    img_rgba.save(disk)?;
+    image::imageops::flip_vertical_in_place(&mut img_rgba); // GL wants origin‑bottom‑left
+    let tile_state = TileLoad::Loaded {
+        texture: img_rgba,
+        source_tile: *tile,
+    };
+    Ok(tile_state)
 }
-pub fn fetch_tile(z: u8, x: u32, y: u32, i: u8) -> Result<RgbaImage, Box<dyn Error>> {
-    let disk: PathBuf;
-    if i == 0 {
-        disk = format!("Tiles/OSMTile_{}_{}_{}.png", z, x, y).into();
+pub fn get_file_path(loaded_tile: TilePos) -> PathBuf {
+    if loaded_tile.m == 0 {
+        format!(
+            "Tiles/OSMTile_{}_{}_{}.png",
+            loaded_tile.z, loaded_tile.x, loaded_tile.y
+        )
+        .into()
     } else {
-        disk = format!("Tiles/ESRITile_{}_{}_{}.png", z, x, y).into();
+        format!(
+            "Tiles/ESRITile_{}_{}_{}.png",
+            loaded_tile.z, loaded_tile.x, loaded_tile.y
+        )
+        .into()
     }
-    if disk.exists() {
-        println!("load from disk");
-        let img = ImageReader::open(&disk)?
-            .with_guessed_format()? // detect by magic bytes
-            .decode()
-            .unwrap_or_else(|e| {
-                eprintln!(
-                    "Failed to open tile, loading from web {}_{}_{}: {}",
-                    z, x, y, e
-                );
-                fetch_tile_from_server(z, x, y, i).unwrap() // your own function returning RgbaImage
-            }); // dynamic image
-        let mut img_rgba = img.to_rgba8(); // hard‑convert to RGBA8
-        image::imageops::flip_vertical_in_place(&mut img_rgba); // GL wants origin‑bottom‑left
-        Ok(img_rgba)
-    } else {
-        println!("load from server");
-        let mut img_rgba = fetch_tile_from_server(z, x, y, i)?.to_rgba8();
-        image::imageops::flip_vertical_in_place(&mut img_rgba); // GL wants origin‑bottom‑left
-        Ok(img_rgba)
+}
+
+pub fn fetch_tile(tile: TilePos) -> Result<TileLoad, Box<dyn Error>> {
+    let mut disk: PathBuf;
+    let mut tile_state = TileLoad::Failed;
+    let mut first_load = true;
+    let mut loaded_tile = tile;
+    while tile_state == TileLoad::Failed && (first_load || tile.z > 0) {
+        disk = get_file_path(loaded_tile);
+        // if loaded_tile.m == 0
+        // {
+        //     disk = format!("Tiles/OSMTile_{}_{}_{}.png", loaded_tile.z, loaded_tile.x, loaded_tile.y).into();
+        // } else {
+        //     disk = format!("Tiles/ESRITile_{}_{}_{}.png", loaded_tile.z, loaded_tile.x, loaded_tile.y).into();
+        // }
+        if disk.exists() {
+            println!("load from disk");
+            let image_open = ImageReader::open(&disk)
+                .unwrap()
+                .with_guessed_format()
+                .unwrap() // detect by magic bytes
+                .decode(); // dynamic image
+            match image_open {
+                Ok(img) => {
+                    if first_load {
+                        let mut img_rgba = img.to_rgba8(); // hard‑convert to RGBA8
+                        image::imageops::flip_vertical_in_place(&mut img_rgba); // GL wants origin‑bottom‑left
+                        //let id = create_texture_from_bitmap(&img_rgba);
+                        tile_state = TileLoad::Loaded {
+                            texture: img_rgba,
+                            source_tile: loaded_tile,
+                        };
+                    } else {
+                        let (x, y, width, height) = loaded_tile.get_crop(&tile);
+                        let cropped = img.crop_imm(x as u32, y as u32, width as u32, height as u32);
+                        //let resized = cropped.resize_exact(256, 256, image::imageops::FilterType::Nearest);
+                        let mut img_rgba = cropped.to_rgba8(); // hard‑convert to RGBA8
+                        image::imageops::flip_vertical_in_place(&mut img_rgba); // GL wants origin‑bottom‑left
+                        //let id = create_texture_from_bitmap(&img_rgba);
+                        tile_state = TileLoad::Loading {
+                            texture: img_rgba,
+                            source_tile: loaded_tile,
+                            target_tile: tile,
+                        };
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Failed to open tile, loading from web {}_{}_{}: {}",
+                        loaded_tile.z, loaded_tile.x, loaded_tile.y, e
+                    );
+                    delete_file(disk);
+                }
+            }
+        }
+        first_load = false;
+        loaded_tile.zoom_out();
     }
+    Ok(tile_state)
 }
 
 pub fn create_texture_from_bitmap(bitmap: &RgbaImage) -> GLuint {
@@ -375,9 +436,15 @@ pub fn create_texture_from_bitmap(bitmap: &RgbaImage) -> GLuint {
             pixels.as_ptr() as *const GLvoid,
         );
 
+        gl::TexParameteri(
+            gl::TEXTURE_2D,
+            gl::TEXTURE_MIN_FILTER,
+            gl::LINEAR_MIPMAP_LINEAR as i32,
+        );
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+
         gl::GenerateMipmap(gl::TEXTURE_2D);
     }
-
     texture
 }
 
@@ -397,16 +464,16 @@ pub fn polygon_mode(mode: PolygonMode) {
     unsafe { gl::PolygonMode(gl::FRONT_AND_BACK, mode as GLenum) };
 }
 
-pub fn create_texture(tile: TilePos, map: u8) -> gl::types::GLuint {
-    let bitmap = opengl_helper::fetch_tile(tile.z, tile.x, tile.y, map).unwrap_or_else(|e| {
-        eprintln!(
-            "Failed to fetch tile {}/{}/{}: {}",
-            tile.z, tile.x, tile.y, e
-        );
-        load_image("test.png") // your own function returning RgbaImage
-    });
-    create_texture_from_bitmap(&bitmap)
-}
+// pub fn create_texture(tile: TilePos, map: u8) -> TileState {
+//     let bitmap = opengl_helper::fetch_tile(tile).unwrap_or_else(|e| {
+//         eprintln!(
+//             "Failed to fetch tile {}/{}/{}: {}",
+//             tile.z, tile.x, tile.y, e
+//         );
+//         (load_image("test.png"),TilePos::new()) // your own function returning RgbaImage
+//     });
+//     create_texture_from_bitmap(&bitmap.0)
+// }
 
 pub fn draw_visible_tiles(
     vp: &mut Viewport,
@@ -414,8 +481,9 @@ pub fn draw_visible_tiles(
     win_h: u32,
     shader: u32, // program id
     vao: u32,
-    textures: &mut LruCache<TilePos, gl::types::GLuint>,
+    tile_cache: &mut LruCache<TilePos, gl::types::GLuint>,
     map: u8,
+    job_tx: Sender<TilePos>,
 ) {
     unsafe {
         gl::UseProgram(shader);
@@ -463,20 +531,80 @@ pub fn draw_visible_tiles(
                 m: map,
             };
             // get or download the texture for this tile -------------
-            let tex_id = *textures.get_or_insert(pos, || create_texture(pos, map));
-            let dx = tx as f64 - vp.center_x;
-            let dy = ty as f64 - vp.center_y;
-            // set per-tile translation in NDC -----------------------
-            let ofs_x = (dx) * scale_x;
-            let ofs_y = -(dy) * scale_y; // window Y is flipped
-            unsafe {
-                gl::Uniform2f(offset_loc, ofs_x as f32, ofs_y as f32);
+            let state = tile_cache.get_key_value(&pos);
+            match state {
+                Some(tile_state) => {
+                    let dx = tx as f64 - vp.center_x;
+                    let dy = ty as f64 - vp.center_y;
+                    // set per-tile translation in NDC -----------------------
+                    let ofs_x = (dx) * scale_x;
+                    let ofs_y = -(dy) * scale_y; // window Y is flipped
+                    unsafe {
+                        gl::Uniform2f(offset_loc, ofs_x as f32, ofs_y as f32);
+                        gl::BindTexture(gl::TEXTURE_2D, *tile_state.1);
+                        gl::DrawElements(gl::TRIANGLES, 6, gl::UNSIGNED_INT, std::ptr::null());
+                    }
+                    // if *tile_state.0 != pos
+                    // {
+                    //     let _ = job_tx.send(pos);
+                    //     tile_cache.pop(&pos);
+                    // }
+                }
+                None => {
+                    let _ = job_tx.send(pos);
+                }
             }
 
-            unsafe {
-                gl::BindTexture(gl::TEXTURE_2D, tex_id);
-                gl::DrawElements(gl::TRIANGLES, 6, gl::UNSIGNED_INT, std::ptr::null());
-            }
+            // match tile_state {
+            //     TileState::Loaded{texture_id, source_tile} => {
+            //         unsafe {
+            //             gl::BindTexture(gl::TEXTURE_2D, texture_id);
+            //             gl::DrawElements(gl::TRIANGLES, 6, gl::UNSIGNED_INT, std::ptr::null());
+            //         }
+            //     },
+            //     TileState::Loading{texture_id, source_tile} => {
+            //         unsafe {
+            //             gl::BindTexture(gl::TEXTURE_2D, texture_id);
+            //             gl::DrawElements(gl::TRIANGLES, 6, gl::UNSIGNED_INT, std::ptr::null());
+            //         }
+            //     },
+            //     TileState::Failed{} => {
+            //     }
+            // }
         }
     }
+}
+// This new function initiates an asynchronous tile load.
+// It's called by draw_visible_tiles.
+// pub async fn request_tile_load_async(
+//     tile_to_load: TilePos,
+//     result_sender: Sender<TileLoadResult>,
+// ) {
+//     thread::spawn(move || {
+//         // The try_fetch_recursive function will attempt to load the tile,
+//         // and fall back to parent tiles if necessary.
+//         // It needs the original Z level to know when to stop falling back, or use a max depth.
+//         match fetch_tile(tile_to_load) {
+//             Ok((image_data, actual_loaded_pos)) => {
+//                 if let Err(e) = result_sender.send(TileLoadResult::Success(tile_to_load, image_data, actual_loaded_pos)) {
+//                     eprintln!("Failed to send loaded tile data to main thread: {}", e);
+//                 }
+//             }
+//             Err(err_msg) => {
+//                 if let Err(e) = result_sender.send(TileLoadResult::Failure(tile_to_load, err_msg)) {
+//                     eprintln!("Failed to send tile load failure to main thread: {}", e);
+//                 }
+//             }
+//         }
+//     });
+// }
+
+pub async fn delete_file_async(path: &str) -> Result<(), std::io::Error> {
+    tokio::fs::remove_file(path).await
+}
+
+#[tokio::main]
+async fn delete_file(s: PathBuf) {
+    // Delete file.txt asynchronously
+    delete_file_async(s.to_str().unwrap()).await.unwrap();
 }
